@@ -1,0 +1,168 @@
+import groovy.transform.Field
+@Field def GOOGLE_SERVICE_ACCOUNT_KEY
+@Field def IMAGE_FAMILY= 'cnetos-7'
+
+@Field def OSCODE = 'centos-7'
+@Field def OSNAME = 'centos-7'
+@Field def SSHUSER= 'clickap'
+/**
+    在建好GCPV-VM後，佈建 Jenkins
+**/
+def job_id='CentOS7Jenkins'
+properties([
+    parameters([
+        booleanParam(name: 'dryRun', defaultValue: false),
+        credentials(name: 'GOOGLE_PROJECT_ID', credentialType: 'org.jenkinsci.plugins.plaincredentials.impl.FileCredentialsImpl', defaultValue: 'chem2021', required: true),
+        string(name: 'IMAGE_FAMILY', trim: true, defaultValue: 'debian-10'),
+        choice(name: 'MACHINE_TYPE', choices: ['n1-standard-4', 'n1-standard-8', 'e2-medium', 'n1-standard-1'], description: '''機器的等級:
+GCP machine-type: https://cloud.google.com/compute/docs/machine-types'''),
+        string(name: 'ZONE', trim: true, defaultValue: 'asia-east1-b', description: '''選擇開機的區域:
+HongKong => asia-east2-a, Singapore => asia-southeast1-a, Changhua County ==> asia-east1-a/b/c
+# 其它區域: https://cloud.google.com/compute/docs/regions-zones?hl=zh-tw'''),
+
+        string(name: 'PREFIX', trim: true, defaultValue: 'jm', description: 'The VM prefix for Jmeter'),
+        choice(name: 'SLAVENODES', choices: ['4', '2', '6', '8']),
+    ])
+])
+
+/**
+    *** DO NOT use 'apt-get install jmeter'
+    apt install openjdk-11-jre-headless
+    wget https://dlcdn.apache.org/jmeter/binaries/apache-jmeter-5.4.1.tgz
+    JMETER_HOME=/home/skyap/jmeter
+    Firewall:
+        4000–4002.
+    Set client.rmi.localport=4000
+    ref: https://mmahato.medium.com/distributed-load-testing-using-jmeter-without-disabling-firewall-e5dc92ce27b2
+    GCP Firewall:
+    gcloud compute --project=subtle-bit-256803 firewall-rules create jmeter --direction=INGRESS --priority=1000 --network=default --action=ALLOW --rules=tcp:1099,tcp:4000-4002 --source-ranges=0.0.0.0/0
+**/
+
+def dryRun= Boolean.valueOf(dryRun)
+def boolDryRun= dryRun ? 'v':'X' // ✓
+def doClean= true
+PREFIX= "${PREFIX}-${BUILD_NUMBER}"
+
+echo """
+JOB_NAME(BASE): ${JOB_NAME}(${JOB_BASE_NAME}) ${JOB_URL}
+-----------------------------------------
+GOOGLE_PROJECT_ID: ${GOOGLE_PROJECT_ID}
+     IMAGE_FAMILY: ${IMAGE_FAMILY}
+     MACHINE_TYPE: ${MACHINE_TYPE}
+-----------------------------------------
+           PREFIX: ${PREFIX}
+       SlaveNodes: ${SLAVENODES}
+           dryRun: (${boolDryRun})
+            Clean: ${doClean}
+-----------------------------------------
+"""
+
+def remote = [allowAnyHosts: true]
+node ('master') {
+    stage('Checkout') {
+        if (doClean) {
+            cleanWs()   // requires workspace cleanup plugin to be installed
+        }
+        checkout scm
+    }
+
+    stage('GCloud check'){
+        sh """#!/bin/bash 
+            echo "Current user: [`whoami`], deal with GCP..."
+            {
+                gcloud --version
+            } || {
+                echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+                sudo apt-get install -y apt-transport-https ca-certificates gnupg
+                curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+                sudo apt-get update && sudo apt-get install -y google-cloud-sdk
+            }
+        """
+    }
+
+    def VM_NAME, jmeterMasterIP
+    stage('Create Master'){
+        VM_NAME= "${PREFIX}-master"
+        withCredentials([file(credentialsId: GOOGLE_PROJECT_ID, variable: 'FILE')]) {
+            GOOGLE_SERVICE_ACCOUNT_KEY= "$FILE"
+            sh """
+                #!/bin/bash             
+                gcloud config set project ${GOOGLE_PROJECT_ID};
+                gcloud auth activate-service-account --key-file ${FILE};
+                
+                gcloud config list;
+            """
+            // gcloud compute instances create instance-1 --project=chem2021 --zone=asia-east1-b --machine-type=e2-medium --network-interface=network-tier=PREMIUM,subnet=default --maintenance-policy=MIGRATE --service-account=904576374165-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write,https://www.googleapis.com/auth/servicecontrol,https://www.googleapis.com/auth/service.management.readonly,https://www.googleapis.com/auth/trace.append --create-disk=auto-delete=yes,boot=yes,device-name=instance-1,image=projects/debian-cloud/global/images/debian-10-buster-v20210916,mode=rw,size=10,type=projects/chem2021/zones/us-central1-a/diskTypes/pd-balanced --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any            
+            sh """
+                gcloud compute instances create '${VM_NAME}' \
+                    --image-family='${IMAGE_FAMILY}' --image-project='debian-cloud' \
+                    --machine-type='${MACHINE_TYPE}' \
+                    --zone='${ZONE}'
+            """
+            def natIP = sh(
+                script: "gcloud compute instances describe ${VM_NAME} --zone=${ZONE} --format='get(networkInterfaces[0].accessConfigs[0].natIP)' ",
+                returnStdout: true).trim ()
+            jmeterMasterIP= "${natIP}"
+            env.JMETER_MASTER_IP= natIP.trim()
+            echo "Jmeter Master IP: ${natIP}"
+        }
+    }
+
+    stage('Jmeter-Master'){
+        def jobBuild
+        jobBuild = build job: 'JmeterMaster', parameters: [
+            credentials(name: 'CREDID', value: 'lxc_skyap'),
+            string(name: 'sshURI', trim: true, value: jmeterMasterIP),
+            [$class: 'BooleanParameterValue', name: 'dryRun', value: dryRun],
+        ], propagate: false
+        jobResult = jobBuild.getResult()
+        //echo "Build of 'QueryMeeting' returned result: ${jobResult}"
+        // List of values: https://stackoverflow.com/questions/46262862/how-to-i-get-the-url-of-build-triggered-with-build-step-on-jenkins
+        def vars = jobBuild.getBuildVariables()
+        copyArtifacts(projectName: 'JmeterMaster')
+        archiveArtifacts artifacts: "rmi_keystore.jks", fingerprint: true
+    }
+
+    def slaveVM_NAME
+    def slaveIPs = []
+    stage('Jmeter-Slave'){
+        slaveVM_NAME= "${PREFIX}-slave"
+        withCredentials([file(credentialsId: GOOGLE_PROJECT_ID, variable: 'FILE')]) {
+            GOOGLE_SERVICE_ACCOUNT_KEY= "$FILE"
+            sh """
+                #!/bin/bash
+                gcloud config set project ${GOOGLE_PROJECT_ID};
+                gcloud auth activate-service-account --key-file ${FILE};
+            """
+            for(int i = 1; i < SlaveNodes.toInteger()+1; i++) {
+                slaveVM_NAME= "${PREFIX}-slave-${i}"
+                sh """
+                    gcloud compute instances create '${slaveVM_NAME}' \
+                        --image-family='${IMAGE_FAMILY}' --image-project='debian-cloud' \
+                        --machine-type='${MACHINE_TYPE}' \
+                        --zone='${ZONE}'
+                """
+                def natIP = sh(
+                    script: "gcloud compute instances describe ${slaveVM_NAME} --zone=${ZONE} --format='get(networkInterfaces[0].accessConfigs[0].natIP)' ", 
+                    returnStdout: true).trim ()
+                jmeterSlaveIP= "${natIP}"
+                //env.JMETER_Slave_IP= natIP.trim()
+                slaveIPs.push(jmeterSlaveIP)
+                echo "Jmeter Slave IP: ${natIP}"
+            }
+        }
+        def jobBuild
+        for (slaveIP in slaveIPs) {
+            jobBuild = build job: 'JmeterSlave', parameters: [
+                credentials(name: 'CREDID', value: 'lxc_skyap'),
+                string(name: 'sshURI', trim: true, value: slaveIP),
+                [$class: 'BooleanParameterValue', name: 'dryRun', value: dryRun],
+            ], propagate: false
+            jobResult = jobBuild.getResult()
+            def vars = jobBuild.getBuildVariables()
+            //copyArtifacts(projectName: 'JmeterMaster')
+            //archiveArtifacts artifacts: "rmi_keystore.jks", fingerprint: true
+            echo "Slave - ${slaveIP} id ready."
+        }
+    }
+}
