@@ -3,11 +3,11 @@
 def remote = [:]
     remote.name = 'test'
     remote.host = '104.199.128.199'
-    remote.user = 'skyap'
+    remote.user = 'jack'
     remote.allowAnyHosts = true
 node() {
     stage('test') {
-        withCredentials([sshUserPrivateKey(credentialsId: "skyap", keyFileVariable: 'keyfile')]) {
+        withCredentials([sshUserPrivateKey(credentialsId: "jack_key", keyFileVariable: 'keyfile')]) {
             remote.identityFile = keyFile
             sshCommand remote: remote, dryRun: false, command: "cat /etc/*release* "
  
