@@ -1,16 +1,18 @@
 /** Must install plugin: ssh-steps
+ * Groovy List
+ * withCredentials()
 **/
-def remote = [:]
-    remote.name = 'test'
-    remote.host = '104.199.128.199'
-    remote.user = 'jack'
-    remote.allowAnyHosts = true
+def _DryRun= true
+def remoteVM = [:]
+    remoteVM.name = 'ubunt-1'
+    remoteVM.host = '34.125.51.112'
+    remoteVM.user = 'jack'
+    remoteVM.allowAnyHosts = true
 node() {
     stage('test') {
-        withCredentials([sshUserPrivateKey(credentialsId: "jack_key", keyFileVariable: 'keyfile')]) {
-            remote.identityFile = keyFile
-            sshCommand remote: remote, dryRun: false, command: "cat /etc/*release* "
- 
+        withCredentials([sshUserPrivateKey(credentialsId: "jack_key", keyFileVariable: 'keyFile')]) {
+            remoteVM.identityFile = keyFile
+            sshCommand remote: remoteVM, dryRun: _DryRun, command: "cat /etc/*release* "
         }
     }
 }
