@@ -1,6 +1,8 @@
 /** Must install plugin: ssh-steps
  * Groovy List
  * withCredentials()
+ * ssh-keygen -m PEM -t rsa -b 4096
+ * https://www.cxyzjd.com/article/u010571709/97768340
 **/
 def _DryRun= true
 def remoteVM = [:]
